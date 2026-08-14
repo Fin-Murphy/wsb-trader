@@ -57,6 +57,8 @@ tr:last-child td{border-bottom:none}
 .ev.signal.BUY .kd{color:#4caf50}
 .ev.signal.SELL .kd{color:#f44336}
 .ev.trade .kd{color:#e91e63}
+.ev.trade.short .kd{color:#9c27b0}
+.ev.trade.exit .kd{color:#ff9800}
 .ev.positions .kd{color:#607d8b}
 .ev.error .kd{color:#f44336}
 .ev .bd{color:#777;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -80,8 +82,8 @@ tr:last-child td{border-bottom:none}
       <h2>Positions</h2>
       <div class="scroll">
         <table>
-          <thead><tr><th>Symbol</th><th>Qty</th><th>Mkt Val</th><th>Unreal P&L</th><th>Avg Entry</th></tr></thead>
-          <tbody id="pos-body"><tr><td colspan="5" class="empty">No positions</td></tr></tbody>
+          <thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Current</th><th>Change</th><th>Unreal P&L</th></tr></thead>
+          <tbody id="pos-body"><tr><td colspan="6" class="empty">No positions</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -113,10 +115,14 @@ function setAccount(a){
 
 function setPositions(ps){
   const tb=$('pos-body');
-  if(!ps||!ps.length){tb.innerHTML='<tr><td colspan="5" class="empty">No positions</td></tr>';return;}
+  if(!ps||!ps.length){tb.innerHTML='<tr><td colspan="6" class="empty">No positions</td></tr>';return;}
   tb.innerHTML=ps.map(p=>{
     const pl=parseFloat(p.unrealized_pl),cls=pl>=0?'pos':'neg';
-    return`<tr><td><strong>${p.symbol}</strong></td><td>${num(p.qty)}</td><td>${money(p.market_value)}</td><td class="${cls}">${money(p.unrealized_pl)}</td><td>${money(p.avg_entry_price)}</td></tr>`;
+    const curr=p.current_price?parseFloat(p.current_price):null;
+    const change=curr?curr-parseFloat(p.avg_entry_price):null;
+    const changePct=change&&parseFloat(p.avg_entry_price)>0?(change/parseFloat(p.avg_entry_price)*100):0;
+    const changeCls=change>=0?'pos':'neg';
+    return`<tr><td><strong>${p.symbol}</strong></td><td>${num(p.qty)}</td><td>${money(p.avg_entry_price)}</td><td>${money(curr)}</td><td class="${changeCls}">${money(change)} (${changePct.toFixed(1)}%)</td><td class="${cls}">${money(p.unrealized_pl)}</td></tr>`;
   }).join('');
 }
 
@@ -137,8 +143,13 @@ function evBody(ev){
     case'scrape':return`${d.n_posts} new posts (${d.n_dupes||0} dupes) — ${(d.sources||[]).join(', ')}`;
     case'mentions':return`${(d.tickers||[]).length} tickers — top: ${(d.tickers||[]).slice(0,5).map(t=>`${t.ticker}×${t.count}`).join(', ')||'none'}`;
     case'signal':return`${d.ticker} → ${d.signal} @ ${((d.confidence||0)*100).toFixed(0)}%  "${d.reasoning}"`;
-    case'trade':return d.action==='buy'?`BUY ${d.ticker}  notional $${d.notional}`:`CLOSE ${d.ticker}`;
+    case'trade':
+      if(d.action==='buy')return`BUY ${d.ticker}  notional $${d.notional}`;
+      if(d.action==='short')return`SHORT ${d.ticker}  notional $${d.notional}`;
+      if(d.action==='exit')return`EXIT ${d.ticker}  ${d.reason||'manual'}`;
+      return`CLOSE ${d.ticker}`;
     case'positions':return`${(d.positions||[]).length} open  portfolio ${money(d.account&&d.account.portfolio_value)}`;
+    case'prices':return`${(d.positions||[]).length} positions  ${(d.positions||[]).slice(0,3).map(p=>`${p.ticker} ${p.change_pct>=0?'+':''}${p.change_pct}%`).join(', ')}`;
     case'error':return`[${d.source}] ${d.message}`;
     default:return JSON.stringify(d);
   }
@@ -147,8 +158,10 @@ function evBody(ev){
 function pushEvent(ev){
   const feed=$('feed');
   const row=document.createElement('div');
-  const sig=ev.kind==='signal'?' '+(ev.data.signal||''):'';
-  row.className=`ev ${ev.kind}${sig}`;
+  let suffix='';
+  if(ev.kind==='signal')suffix=' '+(ev.data.signal||'');
+  if(ev.kind==='trade')suffix=' '+(ev.data.action||'');
+  row.className=`ev ${ev.kind}${suffix}`;
   row.innerHTML=`<span class="ts">${hhmm(ev.ts)}</span><span class="kd">${ev.kind}</span><span class="bd">${evBody(ev)}</span>`;
   feed.prepend(row);
   while(feed.children.length>500)feed.removeChild(feed.lastChild);
@@ -158,7 +171,29 @@ function applyEvent(ev){
   pushEvent(ev);
   if(ev.kind==='positions'){setAccount(ev.data.account);setPositions(ev.data.positions);}
   if(ev.kind==='mentions'){setMentions(ev.data.tickers);}
+  if(ev.kind==='prices'){updatePrices(ev.data.positions);}
   if(ev.kind==='scrape'){$('badge-txt').textContent='live — last tick '+hhmm(ev.ts);}
+}
+
+function updatePrices(priceData){
+  if(!priceData)return;
+  const priceMap={};
+  priceData.forEach(p=>{priceMap[p.ticker]=p;});
+  const rows=$('pos-body').querySelectorAll('tr');
+  rows.forEach(row=>{
+    const symCell=row.querySelector('td');
+    if(!symCell)return;
+    const ticker=symCell.textContent.trim();
+    const priceInfo=priceMap[ticker];
+    if(!priceInfo)return;
+    const cells=row.querySelectorAll('td');
+    if(cells.length>=5){
+      cells[3].textContent=parseFloat(priceInfo.current_price).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+      const changeCls=parseFloat(priceInfo.change)>=0?'pos':'neg';
+      cells[4].className=changeCls;
+      cells[4].textContent=money(parseFloat(priceInfo.change))+' ('+priceInfo.change_pct+'%)';
+    }
+  });
 }
 
 fetch('/api/snapshot').then(r=>r.json()).then(s=>{

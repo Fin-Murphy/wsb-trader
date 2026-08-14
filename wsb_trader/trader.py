@@ -15,6 +15,9 @@ from decimal import Decimal
 from typing import Literal
 
 import httpx
+import structlog
+
+log = structlog.get_logger()
 
 
 PAPER_BASE_URL = "https://paper-api.alpaca.markets"
@@ -37,6 +40,8 @@ class Position:
     market_value: Decimal
     unrealized_pl: Decimal
     avg_entry_price: Decimal
+    current_price: Decimal | None = None
+    position_type: str = "long"  # "long" or "short"
 
 
 @dataclass(frozen=True)
@@ -117,12 +122,18 @@ class PaperTrader:
         notional: Decimal | float | None = None,
         qty: Decimal | float | None = None,
         side: OrderSide = "buy",
-        time_in_force: str = "day",
+        time_in_force: str | None = None,
     ) -> OrderResult:
         """Submit a market order. Provide either ``notional`` (dollar amount)
-        or ``qty`` (share count), not both."""
+        or ``qty`` (share count), not both.
+
+        ``time_in_force`` defaults to ``"gtc"`` for crypto symbols (Alpaca
+        rejects ``"day"`` on crypto) and ``"day"`` for stocks.
+        """
         if (notional is None) == (qty is None):
             raise ValueError("exactly one of notional or qty must be provided")
+        if time_in_force is None:
+            time_in_force = "gtc" if _is_crypto_symbol(symbol) else "day"
         payload: dict = {
             "symbol": symbol,
             "side": side,
@@ -157,6 +168,51 @@ class PaperTrader:
             side=data["side"],
             status=data["status"],
         )
+
+    async def place_short_order(
+        self,
+        symbol: str,
+        *,
+        notional: Decimal | float | None = None,
+        qty: Decimal | float | None = None,
+        time_in_force: str | None = None,
+    ) -> OrderResult:
+        """Submit a short sell order. Provide either ``notional`` or ``qty``.
+
+        Alpaca does not support shorting crypto — callers should guard against
+        crypto symbols before calling this.
+        """
+        return await self.place_market_order(
+            symbol,
+            notional=notional,
+            qty=qty,
+            side="sell",
+            time_in_force=time_in_force,
+        )
+
+    async def get_current_price(self, symbol: str) -> Decimal | None:
+        """Fetch current price from Yahoo Finance.
+
+        Crypto symbols in Alpaca format (``BTCUSD``) are converted to Yahoo's
+        format (``BTC-USD``) before the request.
+        """
+        yahoo_symbol = _to_yahoo_symbol(symbol)
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    "https://query1.finance.yahoo.com/v10/finance/quoteSummary/" + yahoo_symbol,
+                    params={"modules": "price"},
+                )
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+                price = data.get("quoteSummary", {}).get("result", [{}])[0].get("price", {}).get("regularMarketPrice")
+                if price:
+                    return Decimal(str(price))
+                return None
+        except Exception:
+            log.warning("failed_to_fetch_price", symbol=symbol)
+            return None
 
     async def _get(self, path: str) -> dict | list:
         resp = await self._client.get(f"{self.base_url}{path}", headers=self._headers)
@@ -193,3 +249,29 @@ def _parse_position(d: dict) -> Position:
         unrealized_pl=Decimal(d["unrealized_pl"]),
         avg_entry_price=Decimal(d["avg_entry_price"]),
     )
+
+
+def _is_crypto_symbol(symbol: str) -> bool:
+    """Heuristic: any symbol ending in 'USD' with a 2-5 letter base is crypto.
+
+    Matches Alpaca's crypto format (``BTCUSD``, ``ETHUSD``, ``DOGEUSD``).
+    Regular stock tickers never end in USD.
+    """
+    symbol = symbol.upper()
+    if not symbol.endswith("USD") or len(symbol) <= 3:
+        return False
+    base = symbol[:-3]
+    return base.isalpha() and 2 <= len(base) <= 5
+
+
+def _to_yahoo_symbol(symbol: str) -> str:
+    """Convert an Alpaca symbol to Yahoo's format.
+
+    Yahoo uses ``BTC-USD`` where Alpaca uses ``BTCUSD``. Stocks are unchanged.
+    """
+    symbol = symbol.upper()
+    if symbol.endswith("USD") and len(symbol) > 3 and "-" not in symbol:
+        base = symbol[:-3]
+        if base.isalpha() and 2 <= len(base) <= 5:
+            return f"{base}-USD"
+    return symbol

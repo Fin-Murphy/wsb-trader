@@ -1,9 +1,12 @@
-"""Extract stock tickers from free-form text (Reddit posts, comments, titles).
+"""Extract stock and crypto tickers from free-form text (Reddit posts, comments, titles).
 
 Two extraction paths:
   1. Cashtag form: ``$AAPL`` — high confidence, always kept.
   2. Bare uppercase form: ``AAPL`` in prose — filtered against a stop-list of
      WSB jargon and common English words that happen to look like tickers.
+
+Crypto tickers (BTC, ETH, DOGE, etc.) are recognized and mapped to Alpaca's
+symbol format (BTC -> BTCUSD) via ``to_alpaca_symbol``.
 
 Callers can optionally supply a ``valid_tickers`` set (e.g. Alpaca's tradable
 asset list) to further constrain matches. Without it, bare-form extraction is
@@ -14,6 +17,15 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass
+
+
+# Common crypto tickers Alpaca supports (paper trading). Extend as needed.
+# These are always accepted as valid tickers, even bare-form (no cashtag).
+CRYPTO_TICKERS: frozenset[str] = frozenset({
+    "BTC", "ETH", "DOGE", "SOL", "AVAX", "MATIC", "LINK", "LTC", "BCH",
+    "UNI", "AAVE", "SHIB", "DOT", "XRP", "ADA", "USDT", "USDC", "PEPE",
+    "GRT", "MKR", "SUSHI", "YFI", "CRV", "BAT", "TRUMP",
+})
 
 
 # WSB slang, common English words, and abbreviations that pattern-match as
@@ -105,3 +117,24 @@ def aggregate(mention_lists: list[list[TickerMention]]) -> list[TickerMention]:
         (TickerMention(t, total[t], cashtag_total[t]) for t in total),
         key=lambda m: (-m.count, m.ticker),
     )
+
+
+def is_crypto(ticker: str) -> bool:
+    """Return True if the ticker is a known crypto asset."""
+    base = ticker.upper().removesuffix("USD").removesuffix("/USD")
+    return base in CRYPTO_TICKERS
+
+
+def to_alpaca_symbol(ticker: str) -> str:
+    """Map a raw ticker to Alpaca's expected order symbol.
+
+    Stocks pass through unchanged (``AAPL`` -> ``AAPL``). Crypto tickers get a
+    ``USD`` suffix (``BTC`` -> ``BTCUSD``). Already-suffixed crypto tickers
+    pass through (``BTCUSD`` -> ``BTCUSD``).
+    """
+    ticker = ticker.upper()
+    if ticker.endswith("USD") and ticker[:-3] in CRYPTO_TICKERS:
+        return ticker
+    if ticker in CRYPTO_TICKERS:
+        return f"{ticker}USD"
+    return ticker

@@ -15,6 +15,7 @@ from wsb_trader.bot import TickIO, tick
 from wsb_trader.config import load_config
 from wsb_trader.dashboard import create_app
 from wsb_trader.scraper_4chan import FourchanScraper
+from wsb_trader.scraper_coingecko import CoinGeckoScraper
 from wsb_trader.scraper_stocktwits import StockTwitsScraper
 from wsb_trader.scraper_yahoo import YahooFinanceScraper
 from wsb_trader.state import DashboardState
@@ -52,6 +53,11 @@ async def main() -> None:
 
     if cfg.enable_stocktwits:
         s = StockTwitsScraper()
+        scrapers.append(s)
+        closeable.append(s)
+
+    if cfg.enable_coingecko:
+        s = CoinGeckoScraper()
         scrapers.append(s)
         closeable.append(s)
 

@@ -26,13 +26,19 @@ class Config:
     poll_interval_seconds: int
     min_mentions: int
     min_confidence: float
+    min_sell_confidence: float
     position_size_usd: Decimal
+    position_size_pct: float  # if > 0, sizes positions as % of buying power (overrides usd)
     max_positions: int
+    profit_target_pct: float
+    stop_loss_pct: float
+    enable_shorting: bool
 
     # Source toggles — set to "false" to disable a data source.
     enable_4chan: bool
     enable_yahoo: bool
     enable_stocktwits: bool
+    enable_coingecko: bool
 
 
 def load_config(env_file: str | Path | None = _PROJECT_ROOT / ".env") -> Config:
@@ -54,12 +60,18 @@ def load_config(env_file: str | Path | None = _PROJECT_ROOT / ".env") -> Config:
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "300")),
         min_mentions=int(os.getenv("MIN_MENTIONS", "3")),
         min_confidence=float(os.getenv("MIN_CONFIDENCE", "0.75")),
+        min_sell_confidence=float(os.getenv("MIN_SELL_CONFIDENCE", "0.5")),
         position_size_usd=Decimal(os.getenv("POSITION_SIZE_USD", "1000")),
-        max_positions=int(os.getenv("MAX_POSITIONS", "5")),
+        position_size_pct=float(os.getenv("POSITION_SIZE_PCT", "5.0")),
+        max_positions=int(os.getenv("MAX_POSITIONS", "999")),
+        profit_target_pct=float(os.getenv("PROFIT_TARGET_PCT", "5.0")),
+        stop_loss_pct=float(os.getenv("STOP_LOSS_PCT", "-10.0")),
+        enable_shorting=os.getenv("ENABLE_SHORTING", "true").lower() not in ("0", "false", "no"),
 
         enable_4chan=os.getenv("ENABLE_4CHAN", "false").lower() not in ("0", "false", "no"),
         enable_yahoo=os.getenv("ENABLE_YAHOO", "true").lower() not in ("0", "false", "no"),
         enable_stocktwits=os.getenv("ENABLE_STOCKTWITS", "true").lower() not in ("0", "false", "no"),
+        enable_coingecko=os.getenv("ENABLE_COINGECKO", "true").lower() not in ("0", "false", "no"),
     )
 
 
