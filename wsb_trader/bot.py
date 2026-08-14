@@ -26,6 +26,7 @@ class TickIO:
     ai: AIClient
     trader: PaperTrader
     config: Config
+    seen_ids: set[str] = field(default_factory=set)
 
 
 async def tick(io: TickIO) -> None:
@@ -37,11 +38,21 @@ async def tick(io: TickIO) -> None:
     scrape_results = await asyncio.gather(
         *(_safe_fetch(s) for s in io.scrapers),
     )
-    posts = [p for batch in scrape_results for p in batch]
+    all_posts = [p for batch in scrape_results for p in batch]
+
+    posts = []
+    for post in all_posts:
+        pid = _post_id(post)
+        if pid is not None and pid in io.seen_ids:
+            continue
+        posts.append(post)
+        if pid is not None:
+            io.seen_ids.add(pid)
+
     if not posts:
-        log.info("no_posts_from_any_source")
+        log.info("no_new_posts")
         return
-    log.info("scraped", n_posts=len(posts))
+    log.info("scraped", n_posts=len(posts), seen=len(all_posts) - len(posts))
 
     mentions = aggregate([extract(p.combined_text) for p in posts])
     candidates = [m for m in mentions if m.count >= io.config.min_mentions]
@@ -81,6 +92,20 @@ async def tick(io: TickIO) -> None:
         if analysis is None:
             continue
         await _execute_signal(io, analysis, current_positions)
+
+
+def _post_id(post: Any) -> str | None:
+    """Return a namespaced dedup key for posts that carry a stable ID.
+
+    Posts without a natural ID (e.g. synthetic Yahoo trending entries) return
+    None, which tells the caller to always process them.
+    """
+    pid = getattr(post, 'id', None)
+    if pid is None:
+        pid = getattr(post, 'no', None)  # 4chan threads use .no
+    if pid is None:
+        return None
+    return f"{type(post).__name__}:{pid}"
 
 
 async def _safe_fetch(scraper: Any) -> list[Any]:
