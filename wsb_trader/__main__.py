@@ -69,7 +69,13 @@ async def main() -> None:
     if not scrapers:
         raise RuntimeError("all data sources are disabled — nothing to scrape")
 
-    ai = AIClient(base_url=cfg.ai_base_url, api_key=cfg.ai_api_key, model=cfg.ai_model)
+    ai = AIClient(
+        base_url=cfg.ai_base_url,
+        api_key=cfg.ai_api_key,
+        model=cfg.ai_model,
+        temperature=cfg.ai_temperature,
+        max_tokens=cfg.ai_max_tokens,
+    )
     trader = PaperTrader(
         api_key=cfg.alpaca_api_key,
         api_secret=cfg.alpaca_api_secret,

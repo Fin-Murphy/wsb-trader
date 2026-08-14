@@ -17,6 +17,8 @@ class Config:
     ai_base_url: str
     ai_api_key: str
     ai_model: str
+    ai_temperature: float
+    ai_max_tokens: int
 
     reddit_user_agent: str
     reddit_client_id: str
@@ -48,6 +50,8 @@ def load_config(env_file: str | None = ".env") -> Config:
         ai_base_url=_require("AI_BASE_URL"),
         ai_api_key=_require("AI_API_KEY"),
         ai_model=_require("AI_MODEL"),
+        ai_temperature=float(os.getenv("AI_TEMPERATURE", "0.1")),
+        ai_max_tokens=int(os.getenv("AI_MAX_TOKENS", "150")),
 
         reddit_user_agent=_require("REDDIT_USER_AGENT"),
         reddit_client_id=os.getenv("REDDIT_CLIENT_ID", ""),
@@ -60,7 +64,7 @@ def load_config(env_file: str | None = ".env") -> Config:
         max_positions=int(os.getenv("MAX_POSITIONS", "5")),
 
         enable_reddit=os.getenv("ENABLE_REDDIT", "true").lower() not in ("0", "false", "no"),
-        enable_4chan=os.getenv("ENABLE_4CHAN", "true").lower() not in ("0", "false", "no"),
+        enable_4chan=os.getenv("ENABLE_4CHAN", "false").lower() not in ("0", "false", "no"),
         enable_yahoo=os.getenv("ENABLE_YAHOO", "true").lower() not in ("0", "false", "no"),
         enable_stocktwits=os.getenv("ENABLE_STOCKTWITS", "true").lower() not in ("0", "false", "no"),
     )

@@ -51,6 +51,8 @@ class AIClient:
         base_url: str,
         api_key: str,
         model: str,
+        temperature: float = 0.1,
+        max_tokens: int = 150,
         client: httpx.AsyncClient | None = None,
         timeout: float = 60.0,
     ):
@@ -61,6 +63,8 @@ class AIClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=timeout)
 
@@ -83,7 +87,8 @@ class AIClient:
                 {"role": "user", "content": user_msg},
             ],
             "response_format": {"type": "json_object"},
-            "temperature": 0.2,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",

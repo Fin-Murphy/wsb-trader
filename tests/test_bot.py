@@ -19,6 +19,7 @@ def _cfg(**overrides) -> Config:
         alpaca_api_key="k", alpaca_api_secret="s",
         alpaca_base_url="https://paper-api.alpaca.markets",
         ai_base_url="https://ai/v1", ai_api_key="k", ai_model="m",
+        ai_temperature=0.1, ai_max_tokens=150,
         reddit_user_agent="wsb-trader-test/0.1 by u/fin",
         reddit_client_id="test_id",
         reddit_client_secret="test_secret",
