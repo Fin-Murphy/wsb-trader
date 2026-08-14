@@ -1,15 +1,11 @@
 """Fetch recent posts from r/wallstreetbets via Reddit's OAuth API.
 
-Reddit no longer serves ``www.reddit.com/*.json`` reliably to non-browser
-clients — even with a distinctive User-Agent, requests get 403'd. So this
-scraper uses the OAuth flow:
+Uses the client-credentials grant (script-type app) so no user login is
+needed. Register a "script" app at https://www.reddit.com/prefs/apps to
+obtain REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET. The access token is
+cached for its lifetime (1 hour) and refreshed automatically.
 
-  1. Client-credentials grant to ``www.reddit.com/api/v1/access_token``.
-  2. Cached bearer token (valid ~1h) used against ``oauth.reddit.com``.
-  3. Refresh when the token nears expiry.
-
-You need a Reddit "script" app to get a client_id and client_secret:
-  https://www.reddit.com/prefs/apps -> "create app" -> type: script
+Rate limit for authenticated clients is 100 req/min, far above our needs.
 """
 from __future__ import annotations
 
@@ -21,8 +17,8 @@ import httpx
 
 TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 API_BASE = "https://oauth.reddit.com"
-# Refresh a bit before actual expiry to avoid using a token that dies mid-request.
-TOKEN_REFRESH_MARGIN_SECONDS = 60
+
+_TOKEN_REFRESH_BUFFER = 60  # refresh this many seconds before expiry
 
 
 @dataclass(frozen=True)
@@ -45,37 +41,55 @@ class RedditScraper:
     def __init__(
         self,
         *,
+        user_agent: str,
         client_id: str,
         client_secret: str,
-        user_agent: str,
         subreddit: str = "wallstreetbets",
         client: httpx.AsyncClient | None = None,
     ):
-        if not client_id or not client_secret:
-            raise ValueError(
-                "REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET must be set. "
-                "Create a 'script' app at https://www.reddit.com/prefs/apps"
-            )
         if not user_agent or "yourhandle" in user_agent.lower():
             raise ValueError(
                 "REDDIT_USER_AGENT must be set to a distinctive string, "
                 "e.g. 'wsb-trader/0.1 by u/yourhandle'"
             )
-        self.client_id = client_id
-        self.client_secret = client_secret
+        if not client_id or not client_secret:
+            raise ValueError(
+                "REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET must be set. "
+                "Register a 'script' app at https://www.reddit.com/prefs/apps"
+            )
         self.user_agent = user_agent
         self.subreddit = subreddit
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._token: str | None = None
+        self._token_expires_at: float = 0.0
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             headers={"User-Agent": user_agent},
             timeout=15.0,
         )
-        self._token: str | None = None
-        self._token_expires_at: float = 0.0
 
     async def close(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+    async def _ensure_token(self) -> str:
+        if self._token and time.monotonic() < self._token_expires_at - _TOKEN_REFRESH_BUFFER:
+            return self._token
+        resp = await self._client.post(
+            TOKEN_URL,
+            data={"grant_type": "client_credentials"},
+            auth=(self._client_id, self._client_secret),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        self._token = data["access_token"]
+        self._token_expires_at = time.monotonic() + data.get("expires_in", 3600)
+        return self._token
+
+    async def fetch(self, limit: int = 50) -> list[RedditPost]:
+        """Common interface used by the multi-source bot loop."""
+        return await self.fetch_hot(limit)
 
     async def fetch_hot(self, limit: int = 50) -> list[RedditPost]:
         return await self._fetch_listing("hot", limit)
@@ -87,30 +101,15 @@ class RedditScraper:
         return await self._fetch_listing("rising", limit)
 
     async def _fetch_listing(self, sort: str, limit: int) -> list[RedditPost]:
-        token = await self._get_token()
+        token = await self._ensure_token()
         url = f"{API_BASE}/r/{self.subreddit}/{sort}"
         resp = await self._client.get(
             url,
-            params={"limit": limit, "raw_json": 1},
-            headers={"Authorization": f"Bearer {token}"},
+            params={"limit": limit},
+            headers={"Authorization": f"bearer {token}"},
         )
         resp.raise_for_status()
         return _parse_listing(resp.json())
-
-    async def _get_token(self) -> str:
-        """Return a cached token or fetch a new one."""
-        if self._token and time.time() < self._token_expires_at - TOKEN_REFRESH_MARGIN_SECONDS:
-            return self._token
-        resp = await self._client.post(
-            TOKEN_URL,
-            data={"grant_type": "client_credentials"},
-            auth=(self.client_id, self.client_secret),
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        self._token = body["access_token"]
-        self._token_expires_at = time.time() + int(body.get("expires_in", 3600))
-        return self._token
 
 
 def _parse_listing(payload: dict) -> list[RedditPost]:

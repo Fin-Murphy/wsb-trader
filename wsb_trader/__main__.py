@@ -17,6 +17,9 @@ from wsb_trader.ai_client import AIClient
 from wsb_trader.bot import TickIO, tick
 from wsb_trader.config import load_config
 from wsb_trader.scraper import RedditScraper
+from wsb_trader.scraper_4chan import FourchanScraper
+from wsb_trader.scraper_stocktwits import StockTwitsScraper
+from wsb_trader.scraper_yahoo import YahooFinanceScraper
 from wsb_trader.trader import PaperTrader
 
 
@@ -36,18 +39,43 @@ async def main() -> None:
     log = structlog.get_logger()
     cfg = load_config()
 
-    scraper = RedditScraper(
-        client_id=cfg.reddit_client_id,
-        client_secret=cfg.reddit_client_secret,
-        user_agent=cfg.reddit_user_agent,
-    )
+    scrapers = []
+    closeable = []
+
+    if cfg.enable_reddit:
+        s = RedditScraper(
+            user_agent=cfg.reddit_user_agent,
+            client_id=cfg.reddit_client_id,
+            client_secret=cfg.reddit_client_secret,
+        )
+        scrapers.append(s)
+        closeable.append(s)
+
+    if cfg.enable_4chan:
+        s = FourchanScraper()
+        scrapers.append(s)
+        closeable.append(s)
+
+    if cfg.enable_yahoo:
+        s = YahooFinanceScraper()
+        scrapers.append(s)
+        closeable.append(s)
+
+    if cfg.enable_stocktwits:
+        s = StockTwitsScraper()
+        scrapers.append(s)
+        closeable.append(s)
+
+    if not scrapers:
+        raise RuntimeError("all data sources are disabled — nothing to scrape")
+
     ai = AIClient(base_url=cfg.ai_base_url, api_key=cfg.ai_api_key, model=cfg.ai_model)
     trader = PaperTrader(
         api_key=cfg.alpaca_api_key,
         api_secret=cfg.alpaca_api_secret,
         base_url=cfg.alpaca_base_url,
     )
-    io = TickIO(scraper=scraper, ai=ai, trader=trader, config=cfg)
+    io = TickIO(scrapers=scrapers, ai=ai, trader=trader, config=cfg)
 
     # Sanity-check credentials before starting the loop.
     acct = await trader.get_account()
@@ -58,6 +86,7 @@ async def main() -> None:
         portfolio_value=str(acct.portfolio_value),
         model=cfg.ai_model,
         poll_interval=cfg.poll_interval_seconds,
+        sources=[type(s).__name__ for s in scrapers],
     )
 
     scheduler = AsyncIOScheduler()
@@ -80,7 +109,8 @@ async def main() -> None:
     log.info("shutting_down")
 
     scheduler.shutdown(wait=False)
-    await scraper.close()
+    for s in closeable:
+        await s.close()
     await ai.close()
     await trader.close()
 

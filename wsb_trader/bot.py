@@ -6,14 +6,14 @@ dependencies without spinning up the scheduler.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import structlog
 
 from wsb_trader.ai_client import AIClient, AIResponseError, TickerAnalysis
 from wsb_trader.config import Config
 from wsb_trader.extractor import aggregate, extract
-from wsb_trader.scraper import RedditScraper
 from wsb_trader.trader import PaperTrader
 
 log = structlog.get_logger()
@@ -22,7 +22,7 @@ log = structlog.get_logger()
 @dataclass
 class TickIO:
     """Wired dependencies for one loop iteration. Injectable for testing."""
-    scraper: RedditScraper
+    scrapers: list[Any]  # each element must have async fetch() -> list[...with combined_text]
     ai: AIClient
     trader: PaperTrader
     config: Config
@@ -31,13 +31,15 @@ class TickIO:
 async def tick(io: TickIO) -> None:
     """Run one scrape → analyze → trade cycle.
 
-    Exceptions from any single stage are logged and swallowed so a transient
-    provider outage doesn't kill the whole bot.
+    Scrapes all configured sources in parallel. A failure in one source is
+    logged and skipped; the loop continues with whatever posts were gathered.
     """
-    try:
-        posts = await io.scraper.fetch_hot(limit=50)
-    except Exception:
-        log.exception("scrape_failed")
+    scrape_results = await asyncio.gather(
+        *(_safe_fetch(s) for s in io.scrapers),
+    )
+    posts = [p for batch in scrape_results for p in batch]
+    if not posts:
+        log.info("no_posts_from_any_source")
         return
     log.info("scraped", n_posts=len(posts))
 
@@ -79,6 +81,14 @@ async def tick(io: TickIO) -> None:
         if analysis is None:
             continue
         await _execute_signal(io, analysis, current_positions)
+
+
+async def _safe_fetch(scraper: Any) -> list[Any]:
+    try:
+        return await scraper.fetch()
+    except Exception:
+        log.exception("scrape_failed", source=type(scraper).__name__)
+        return []
 
 
 async def _safe_analyze(

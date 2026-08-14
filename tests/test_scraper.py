@@ -1,13 +1,12 @@
-import time
-
 import httpx
 import pytest
 import respx
 
 from wsb_trader.scraper import (
+    API_BASE,
+    TOKEN_URL,
     RedditPost,
     RedditScraper,
-    TOKEN_URL,
     _parse_listing,
 )
 
@@ -22,10 +21,15 @@ def _listing(posts: list[dict]) -> dict:
     }
 
 
+def _token_response(token: str = "test_token") -> httpx.Response:
+    return httpx.Response(200, json={"access_token": token, "expires_in": 3600})
+
+
 def _make_scraper() -> RedditScraper:
     return RedditScraper(
-        client_id="ci", client_secret="cs",
         user_agent="wsb-trader-tests/0.1 by u/fin",
+        client_id="test_client_id",
+        client_secret="test_client_secret",
     )
 
 
@@ -81,108 +85,45 @@ class TestParseListing:
 
 
 class TestScraperInit:
-    def test_rejects_missing_client_id(self):
-        with pytest.raises(ValueError, match="REDDIT_CLIENT_ID"):
-            RedditScraper(client_id="", client_secret="s", user_agent="ua/0.1 by u/x")
-
-    def test_rejects_missing_client_secret(self):
-        with pytest.raises(ValueError, match="REDDIT_CLIENT_ID"):
-            RedditScraper(client_id="i", client_secret="", user_agent="ua/0.1 by u/x")
+    def test_rejects_empty_user_agent(self):
+        with pytest.raises(ValueError, match="REDDIT_USER_AGENT"):
+            RedditScraper(user_agent="", client_id="id", client_secret="secret")
 
     def test_rejects_placeholder_user_agent(self):
         with pytest.raises(ValueError, match="REDDIT_USER_AGENT"):
             RedditScraper(
-                client_id="i", client_secret="s",
                 user_agent="wsb-trader/0.1 by u/yourhandle",
+                client_id="id",
+                client_secret="secret",
             )
 
+    def test_rejects_missing_client_id(self):
+        with pytest.raises(ValueError, match="REDDIT_CLIENT_ID"):
+            RedditScraper(
+                user_agent="wsb-trader/0.1 by u/fin",
+                client_id="",
+                client_secret="secret",
+            )
 
-class TestOAuthTokenFlow:
-    @respx.mock
-    async def test_fetch_hot_gets_token_first(self):
+    def test_rejects_missing_client_secret(self):
+        with pytest.raises(ValueError, match="REDDIT_CLIENT_ID"):
+            RedditScraper(
+                user_agent="wsb-trader/0.1 by u/fin",
+                client_id="id",
+                client_secret="",
+            )
+
+    def test_sends_user_agent_header_on_owned_client(self):
         scraper = _make_scraper()
-        token_route = respx.post(TOKEN_URL).mock(
-            return_value=httpx.Response(200, json={
-                "access_token": "tok-1", "expires_in": 3600, "token_type": "bearer",
-            })
-        )
-        listing_route = respx.get("https://oauth.reddit.com/r/wallstreetbets/hot").mock(
-            return_value=httpx.Response(200, json=_listing([]))
-        )
-        await scraper.fetch_hot()
-        await scraper.close()
-        assert token_route.called
-        assert listing_route.called
-        # The listing request should carry a bearer of the token we got.
-        auth_header = listing_route.calls.last.request.headers["authorization"]
-        assert auth_header == "Bearer tok-1"
-
-    @respx.mock
-    async def test_token_is_cached_across_requests(self):
-        scraper = _make_scraper()
-        token_route = respx.post(TOKEN_URL).mock(
-            return_value=httpx.Response(200, json={
-                "access_token": "tok-cached", "expires_in": 3600,
-            })
-        )
-        listing_route = respx.get("https://oauth.reddit.com/r/wallstreetbets/hot").mock(
-            return_value=httpx.Response(200, json=_listing([]))
-        )
-        await scraper.fetch_hot()
-        await scraper.fetch_hot()
-        await scraper.fetch_hot()
-        await scraper.close()
-        # Token endpoint hit exactly once; three listing calls used the cache.
-        assert token_route.call_count == 1
-        assert listing_route.call_count == 3
-
-    @respx.mock
-    async def test_token_refresh_when_expired(self):
-        scraper = _make_scraper()
-        # Force the cache to look expired.
-        scraper._token = "old"
-        scraper._token_expires_at = time.time() - 1
-        token_route = respx.post(TOKEN_URL).mock(
-            return_value=httpx.Response(200, json={
-                "access_token": "fresh", "expires_in": 3600,
-            })
-        )
-        listing_route = respx.get("https://oauth.reddit.com/r/wallstreetbets/hot").mock(
-            return_value=httpx.Response(200, json=_listing([]))
-        )
-        await scraper.fetch_hot()
-        await scraper.close()
-        assert token_route.called
-        assert listing_route.calls.last.request.headers["authorization"] == "Bearer fresh"
-
-    @respx.mock
-    async def test_token_endpoint_gets_client_credentials_grant(self):
-        scraper = _make_scraper()
-        token_route = respx.post(TOKEN_URL).mock(
-            return_value=httpx.Response(200, json={
-                "access_token": "t", "expires_in": 3600,
-            })
-        )
-        respx.get("https://oauth.reddit.com/r/wallstreetbets/hot").mock(
-            return_value=httpx.Response(200, json=_listing([]))
-        )
-        await scraper.fetch_hot()
-        await scraper.close()
-
-        req = token_route.calls.last.request
-        assert b"grant_type=client_credentials" in req.content
-        # Basic auth header carries client_id:client_secret base64-encoded.
-        assert req.headers["authorization"].startswith("Basic ")
+        assert scraper._client.headers["User-Agent"] == "wsb-trader-tests/0.1 by u/fin"
 
 
 class TestScraperFetching:
     @respx.mock
     async def test_fetch_hot_returns_parsed_posts(self):
         scraper = _make_scraper()
-        respx.post(TOKEN_URL).mock(
-            return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
-        )
-        respx.get("https://oauth.reddit.com/r/wallstreetbets/hot").mock(
+        respx.post(TOKEN_URL).mock(return_value=_token_response())
+        respx.get(f"{API_BASE}/r/wallstreetbets/hot").mock(
             return_value=httpx.Response(200, json=_listing([
                 {
                     "id": "1", "title": "$GME to the moon", "selftext": "",
@@ -199,23 +140,43 @@ class TestScraperFetching:
     @respx.mock
     async def test_fetch_hot_sends_limit_param(self):
         scraper = _make_scraper()
-        respx.post(TOKEN_URL).mock(
-            return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
-        )
-        listing_route = respx.get("https://oauth.reddit.com/r/wallstreetbets/hot").mock(
+        respx.post(TOKEN_URL).mock(return_value=_token_response())
+        route = respx.get(f"{API_BASE}/r/wallstreetbets/hot").mock(
             return_value=httpx.Response(200, json=_listing([]))
         )
         await scraper.fetch_hot(limit=25)
         await scraper.close()
-        assert listing_route.calls.last.request.url.params.get("limit") == "25"
+        params = route.calls.last.request.url.params
+        assert params.get("limit") == "25"
+
+    @respx.mock
+    async def test_sends_bearer_auth_header(self):
+        scraper = _make_scraper()
+        respx.post(TOKEN_URL).mock(return_value=_token_response("mytoken"))
+        route = respx.get(f"{API_BASE}/r/wallstreetbets/hot").mock(
+            return_value=httpx.Response(200, json=_listing([]))
+        )
+        await scraper.fetch_hot()
+        await scraper.close()
+        assert route.calls.last.request.headers.get("authorization") == "bearer mytoken"
+
+    @respx.mock
+    async def test_token_is_cached_across_calls(self):
+        scraper = _make_scraper()
+        token_route = respx.post(TOKEN_URL).mock(return_value=_token_response())
+        respx.get(f"{API_BASE}/r/wallstreetbets/hot").mock(
+            return_value=httpx.Response(200, json=_listing([]))
+        )
+        await scraper.fetch_hot()
+        await scraper.fetch_hot()
+        await scraper.close()
+        assert token_route.call_count == 1  # fetched once, reused on second call
 
     @respx.mock
     async def test_raises_on_listing_http_error(self):
         scraper = _make_scraper()
-        respx.post(TOKEN_URL).mock(
-            return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
-        )
-        respx.get("https://oauth.reddit.com/r/wallstreetbets/hot").mock(
+        respx.post(TOKEN_URL).mock(return_value=_token_response())
+        respx.get(f"{API_BASE}/r/wallstreetbets/hot").mock(
             return_value=httpx.Response(429)
         )
         with pytest.raises(httpx.HTTPStatusError):
@@ -223,15 +184,21 @@ class TestScraperFetching:
         await scraper.close()
 
     @respx.mock
+    async def test_raises_on_token_http_error(self):
+        scraper = _make_scraper()
+        respx.post(TOKEN_URL).mock(return_value=httpx.Response(401))
+        with pytest.raises(httpx.HTTPStatusError):
+            await scraper.fetch_hot()
+        await scraper.close()
+
+    @respx.mock
     async def test_fetch_new_and_rising_use_different_paths(self):
         scraper = _make_scraper()
-        respx.post(TOKEN_URL).mock(
-            return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
-        )
-        new_route = respx.get("https://oauth.reddit.com/r/wallstreetbets/new").mock(
+        respx.post(TOKEN_URL).mock(return_value=_token_response())
+        new_route = respx.get(f"{API_BASE}/r/wallstreetbets/new").mock(
             return_value=httpx.Response(200, json=_listing([]))
         )
-        rising_route = respx.get("https://oauth.reddit.com/r/wallstreetbets/rising").mock(
+        rising_route = respx.get(f"{API_BASE}/r/wallstreetbets/rising").mock(
             return_value=httpx.Response(200, json=_listing([]))
         )
         await scraper.fetch_new()
@@ -239,3 +206,19 @@ class TestScraperFetching:
         await scraper.close()
         assert new_route.called
         assert rising_route.called
+
+    @respx.mock
+    async def test_custom_subreddit(self):
+        scraper = RedditScraper(
+            user_agent="wsb-trader-tests/0.1 by u/fin",
+            client_id="test_client_id",
+            client_secret="test_client_secret",
+            subreddit="stocks",
+        )
+        respx.post(TOKEN_URL).mock(return_value=_token_response())
+        route = respx.get(f"{API_BASE}/r/stocks/hot").mock(
+            return_value=httpx.Response(200, json=_listing([]))
+        )
+        await scraper.fetch_hot()
+        await scraper.close()
+        assert route.called

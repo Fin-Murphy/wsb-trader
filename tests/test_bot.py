@@ -19,8 +19,10 @@ def _cfg(**overrides) -> Config:
         alpaca_api_key="k", alpaca_api_secret="s",
         alpaca_base_url="https://paper-api.alpaca.markets",
         ai_base_url="https://ai/v1", ai_api_key="k", ai_model="m",
-        reddit_client_id="ci", reddit_client_secret="cs",
         reddit_user_agent="wsb-trader-test/0.1 by u/fin",
+        reddit_client_id="test_id",
+        reddit_client_secret="test_secret",
+        enable_reddit=True, enable_4chan=True, enable_yahoo=True, enable_stocktwits=True,
         poll_interval_seconds=60,
         min_mentions=2,
         min_confidence=0.7,
@@ -45,7 +47,7 @@ def _mock_io(
     cfg: Config | None = None,
 ) -> TickIO:
     scraper = MagicMock()
-    scraper.fetch_hot = AsyncMock(return_value=posts)
+    scraper.fetch = AsyncMock(return_value=posts)
 
     ai = MagicMock()
     async def _analyze(ticker: str, excerpts: list[str]):
@@ -57,7 +59,7 @@ def _mock_io(
     trader.place_market_order = AsyncMock()
     trader.close_position = AsyncMock()
 
-    return TickIO(scraper=scraper, ai=ai, trader=trader, config=cfg or _cfg())
+    return TickIO(scrapers=[scraper], ai=ai, trader=trader, config=cfg or _cfg())
 
 
 class TestTickHappyPath:
@@ -168,7 +170,7 @@ class TestTickThresholds:
 class TestTickResilience:
     async def test_scrape_failure_short_circuits(self):
         io = _mock_io([], {})
-        io.scraper.fetch_hot = AsyncMock(side_effect=RuntimeError("reddit down"))
+        io.scrapers[0].fetch = AsyncMock(side_effect=RuntimeError("reddit down"))
 
         # Should not raise — errors get logged and swallowed.
         await tick(io)
