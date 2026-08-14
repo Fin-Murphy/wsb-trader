@@ -1,6 +1,6 @@
 # wsb-trader
 
-## Tremble before me, as I have built probably the worst performing trading bot of all time, attempting to mimic the habits of the denizens of r/WallStreetBets.
+## Tremble before me, as I have built probably the worst performing trading bot of all time by attempting to mimic the habits of the denizens of r/WallStreetBets.
 
 ## This bot holds as many consecutive positions as his meager finances will allow, short sell, stop loss, and so much more. He is as senile as he is aggressive, and his trading decisions are based entirely off such oracles as Yahoo finance and... 4chan /biz (revolting). Download this bot at your own risk, and for the love of all that is good and holy, dont give it actual money to work with. 
 
