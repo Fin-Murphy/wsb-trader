@@ -52,6 +52,10 @@ class AlpacaError(Exception):
     """Alpaca returned an error we should surface to the caller."""
 
 
+class AssetNotTradable(AlpacaError):
+    """Alpaca rejected the order because the asset is not tradable (code 42210000)."""
+
+
 class PaperTrader:
     def __init__(
         self,
@@ -171,6 +175,12 @@ class PaperTrader:
 
 def _unwrap(resp: httpx.Response) -> dict | list:
     if resp.status_code >= 400:
+        try:
+            code = resp.json().get("code")
+        except Exception:
+            code = None
+        if code == 42210000:
+            raise AssetNotTradable(resp.json().get("message", "asset not tradable"))
         raise AlpacaError(f"[{resp.status_code}] {resp.text}")
     return resp.json()
 

@@ -2,6 +2,7 @@
 
 The bot's tick function coordinates scrape → extract → analyze → trade. These
 tests exercise the coordination logic without hitting any real network."""
+from dataclasses import dataclass
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,8 +11,18 @@ import pytest
 from wsb_trader.ai_client import TickerAnalysis
 from wsb_trader.bot import TickIO, tick
 from wsb_trader.config import Config
-from wsb_trader.scraper import RedditPost
 from wsb_trader.trader import Position
+
+
+@dataclass(frozen=True)
+class _Post:
+    id: str
+    title: str
+    selftext: str = ""
+
+    @property
+    def combined_text(self) -> str:
+        return f"{self.title}\n{self.selftext}"
 
 
 def _cfg(**overrides) -> Config:
@@ -20,10 +31,7 @@ def _cfg(**overrides) -> Config:
         alpaca_base_url="https://paper-api.alpaca.markets",
         ai_base_url="https://ai/v1", ai_api_key="k", ai_model="m",
         ai_temperature=0.1, ai_max_tokens=150,
-        reddit_user_agent="wsb-trader-test/0.1 by u/fin",
-        reddit_client_id="test_id",
-        reddit_client_secret="test_secret",
-        enable_reddit=True, enable_4chan=True, enable_yahoo=True, enable_stocktwits=True,
+        enable_4chan=True, enable_yahoo=True, enable_stocktwits=True,
         poll_interval_seconds=60,
         min_mentions=2,
         min_confidence=0.7,
@@ -34,15 +42,12 @@ def _cfg(**overrides) -> Config:
     return Config(**defaults)
 
 
-def _post(pid: str, title: str, body: str = "") -> RedditPost:
-    return RedditPost(
-        id=pid, title=title, selftext=body, score=0, num_comments=0,
-        permalink=f"/{pid}", flair=None,
-    )
+def _post(pid: str, title: str, body: str = "") -> _Post:
+    return _Post(id=pid, title=title, selftext=body)
 
 
 def _mock_io(
-    posts: list[RedditPost],
+    posts: list[_Post],
     analyses: dict[str, TickerAnalysis],
     positions: list[Position] | None = None,
     cfg: Config | None = None,

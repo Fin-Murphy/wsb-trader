@@ -1,25 +1,23 @@
-"""Entry point: ``python -m wsb_trader``.
-
-Wires up dependencies, starts an APScheduler-driven loop, and blocks forever.
-Handles SIGINT/SIGTERM for graceful shutdown so no in-flight HTTP requests get
-cut off mid-flight.
-"""
+"""Entry point: ``python -m wsb_trader``."""
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 
 import structlog
+import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from wsb_trader.ai_client import AIClient
 from wsb_trader.bot import TickIO, tick
 from wsb_trader.config import load_config
-from wsb_trader.scraper import RedditScraper
+from wsb_trader.dashboard import create_app
 from wsb_trader.scraper_4chan import FourchanScraper
 from wsb_trader.scraper_stocktwits import StockTwitsScraper
 from wsb_trader.scraper_yahoo import YahooFinanceScraper
+from wsb_trader.state import DashboardState
 from wsb_trader.trader import PaperTrader
 
 
@@ -41,15 +39,6 @@ async def main() -> None:
 
     scrapers = []
     closeable = []
-
-    if cfg.enable_reddit:
-        s = RedditScraper(
-            user_agent=cfg.reddit_user_agent,
-            client_id=cfg.reddit_client_id,
-            client_secret=cfg.reddit_client_secret,
-        )
-        scrapers.append(s)
-        closeable.append(s)
 
     if cfg.enable_4chan:
         s = FourchanScraper()
@@ -81,10 +70,10 @@ async def main() -> None:
         api_secret=cfg.alpaca_api_secret,
         base_url=cfg.alpaca_base_url,
     )
-    io = TickIO(scrapers=scrapers, ai=ai, trader=trader, config=cfg)
 
-    # Sanity-check credentials before starting the loop.
+    # Sanity-check credentials and populate initial dashboard state.
     acct = await trader.get_account()
+    positions = await trader.list_positions()
     log.info(
         "startup",
         cash=str(acct.cash),
@@ -95,14 +84,25 @@ async def main() -> None:
         sources=[type(s).__name__ for s in scrapers],
     )
 
+    state = DashboardState(account=acct, positions=positions)
+    io = TickIO(scrapers=scrapers, ai=ai, trader=trader, config=cfg, state=state)
+
+    # Start the dashboard web server in the current event loop.
+    dashboard_port = int(os.getenv("DASHBOARD_PORT", "8080"))
+    app = create_app(state)
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="0.0.0.0", port=dashboard_port, log_level="warning")
+    )
+    asyncio.create_task(server.serve())
+    log.info("dashboard_started", port=dashboard_port)
+
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         tick, "interval", seconds=cfg.poll_interval_seconds,
-        args=[io], next_run_time=None,  # first tick fires now via kickoff below
+        args=[io], next_run_time=None,
     )
     scheduler.start()
 
-    # Fire once immediately rather than waiting a full interval.
     asyncio.create_task(tick(io))
 
     stop_event = asyncio.Event()
@@ -115,6 +115,7 @@ async def main() -> None:
     log.info("shutting_down")
 
     scheduler.shutdown(wait=False)
+    server.should_exit = True
     for s in closeable:
         await s.close()
     await ai.close()

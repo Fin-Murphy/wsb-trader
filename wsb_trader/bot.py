@@ -1,12 +1,9 @@
-"""One iteration of the trading loop, wired end-to-end.
-
-Kept as a standalone function so we can unit-test the whole flow with mocked
-dependencies without spinning up the scheduler.
-"""
+"""One iteration of the trading loop, wired end-to-end."""
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
@@ -14,7 +11,8 @@ import structlog
 from wsb_trader.ai_client import AIClient, AIResponseError, TickerAnalysis
 from wsb_trader.config import Config
 from wsb_trader.extractor import aggregate, extract
-from wsb_trader.trader import PaperTrader
+from wsb_trader.state import DashboardState
+from wsb_trader.trader import AssetNotTradable, PaperTrader
 
 log = structlog.get_logger()
 
@@ -27,14 +25,10 @@ class TickIO:
     trader: PaperTrader
     config: Config
     seen_ids: set[str] = field(default_factory=set)
+    state: DashboardState | None = None
 
 
 async def tick(io: TickIO) -> None:
-    """Run one scrape → analyze → trade cycle.
-
-    Scrapes all configured sources in parallel. A failure in one source is
-    logged and skipped; the loop continues with whatever posts were gathered.
-    """
     scrape_results = await asyncio.gather(
         *(_safe_fetch(s) for s in io.scrapers),
     )
@@ -49,10 +43,21 @@ async def tick(io: TickIO) -> None:
         if pid is not None:
             io.seen_ids.add(pid)
 
+    n_dupes = len(all_posts) - len(posts)
+
     if not posts:
         log.info("no_new_posts")
         return
-    log.info("scraped", n_posts=len(posts), seen=len(all_posts) - len(posts))
+
+    log.info("scraped", n_posts=len(posts), seen=n_dupes)
+    if io.state is not None:
+        io.state.last_tick_at = datetime.now(timezone.utc).isoformat()
+        io.state.emit(
+            "scrape",
+            n_posts=len(posts),
+            n_dupes=n_dupes,
+            sources=[type(s).__name__ for s in io.scrapers],
+        )
 
     mentions = aggregate([extract(p.combined_text) for p in posts])
     candidates = [m for m in mentions if m.count >= io.config.min_mentions]
@@ -62,11 +67,20 @@ async def tick(io: TickIO) -> None:
         above_threshold=len(candidates),
         threshold=io.config.min_mentions,
     )
+
+    if io.state is not None:
+        io.state.mentions = mentions
+        io.state.emit(
+            "mentions",
+            tickers=[
+                {"ticker": m.ticker, "count": m.count, "cashtag_count": m.cashtag_count}
+                for m in mentions[:50]
+            ],
+        )
+
     if not candidates:
         return
 
-    # Build a per-ticker excerpt list: for each candidate ticker, gather the
-    # posts that actually mentioned it (checked via a fresh extraction).
     per_ticker_excerpts: dict[str, list[str]] = {m.ticker: [] for m in candidates}
     for post in posts:
         text = post.combined_text
@@ -75,13 +89,11 @@ async def tick(io: TickIO) -> None:
             if candidate.ticker in tickers_in_post:
                 per_ticker_excerpts[candidate.ticker].append(text)
 
-    # Analyze in parallel — each ticker is an independent LLM call.
     analyses = await asyncio.gather(*(
         _safe_analyze(io.ai, m.ticker, per_ticker_excerpts[m.ticker])
         for m in candidates
     ))
 
-    # Execute trades based on signals.
     try:
         current_positions = {p.symbol: p for p in await io.trader.list_positions()}
     except Exception:
@@ -93,16 +105,40 @@ async def tick(io: TickIO) -> None:
             continue
         await _execute_signal(io, analysis, current_positions)
 
+    # Refresh account + positions after all trades and publish to dashboard.
+    if io.state is not None:
+        try:
+            refreshed = await io.trader.list_positions()
+            acct = await io.trader.get_account()
+            io.state.positions = refreshed
+            io.state.account = acct
+            io.state.emit(
+                "positions",
+                account={
+                    "cash": str(acct.cash),
+                    "buying_power": str(acct.buying_power),
+                    "portfolio_value": str(acct.portfolio_value),
+                    "equity": str(acct.equity),
+                },
+                positions=[
+                    {
+                        "symbol": p.symbol,
+                        "qty": str(p.qty),
+                        "market_value": str(p.market_value),
+                        "unrealized_pl": str(p.unrealized_pl),
+                        "avg_entry_price": str(p.avg_entry_price),
+                    }
+                    for p in refreshed
+                ],
+            )
+        except Exception:
+            log.exception("dashboard_refresh_failed")
+
 
 def _post_id(post: Any) -> str | None:
-    """Return a namespaced dedup key for posts that carry a stable ID.
-
-    Posts without a natural ID (e.g. synthetic Yahoo trending entries) return
-    None, which tells the caller to always process them.
-    """
-    pid = getattr(post, 'id', None)
+    pid = getattr(post, "id", None)
     if pid is None:
-        pid = getattr(post, 'no', None)  # 4chan threads use .no
+        pid = getattr(post, "no", None)  # 4chan threads use .no
     if pid is None:
         return None
     return f"{type(post).__name__}:{pid}"
@@ -142,8 +178,17 @@ async def _execute_signal(
         has_position=has_position,
     )
 
+    if io.state is not None:
+        io.state.emit(
+            "signal",
+            ticker=analysis.ticker,
+            signal=analysis.signal,
+            confidence=analysis.confidence,
+            reasoning=analysis.reasoning,
+        )
+
     if analysis.confidence < io.config.min_confidence:
-        return  # not confident enough to act
+        return
 
     if analysis.signal == "BUY" and not has_position:
         if len(current_positions) >= io.config.max_positions:
@@ -156,12 +201,30 @@ async def _execute_signal(
                 side="buy",
             )
             log.info("bought", ticker=analysis.ticker, order_id=order.id)
+            if io.state is not None:
+                io.state.emit(
+                    "trade",
+                    action="buy",
+                    ticker=analysis.ticker,
+                    notional=str(io.config.position_size_usd),
+                    order_id=order.id,
+                )
+        except AssetNotTradable:
+            log.warning("asset_not_tradable", ticker=analysis.ticker)
+            if io.state is not None:
+                io.state.emit("error", source="trade", message=f"{analysis.ticker} not tradable on Alpaca")
         except Exception:
             log.exception("buy_failed", ticker=analysis.ticker)
+            if io.state is not None:
+                io.state.emit("error", source="trade", message=f"buy {analysis.ticker} failed")
 
     elif analysis.signal == "SELL" and has_position:
         try:
             order = await io.trader.close_position(analysis.ticker)
             log.info("closed", ticker=analysis.ticker, order_id=order.id if order else None)
+            if io.state is not None:
+                io.state.emit("trade", action="sell", ticker=analysis.ticker)
         except Exception:
             log.exception("close_failed", ticker=analysis.ticker)
+            if io.state is not None:
+                io.state.emit("error", source="trade", message=f"close {analysis.ticker} failed")
