@@ -79,7 +79,7 @@ tr:last-child td{border-bottom:none}
   </div>
   <div class="panels">
     <div class="card">
-      <h2>Positions</h2>
+      <h2>Positions <span id="pos-count" style="color:#888;font-weight:400;margin-left:8px">(0)</span></h2>
       <div class="scroll">
         <table>
           <thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Current</th><th>Change</th><th>Unreal P&L</th></tr></thead>
@@ -101,8 +101,35 @@ tr:last-child td{border-bottom:none}
 </div>
 <script>
 const $=id=>document.getElementById(id);
-const money=v=>v==null?'—':'$'+parseFloat(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-const num=v=>v==null?'—':parseFloat(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+// Adaptive price formatter — meme coins trade at fractions of a cent so a
+// fixed 2-decimal display rounds to $0.00. Scale precision to magnitude.
+function money(v){
+  if(v==null)return'—';
+  const n=parseFloat(v);
+  if(!isFinite(n))return'—';
+  const abs=Math.abs(n);
+  let digits;
+  if(abs===0)digits=2;
+  else if(abs>=1)digits=2;
+  else if(abs>=0.01)digits=4;
+  else if(abs>=0.0001)digits=6;
+  else digits=8;
+  const sign=n<0?'-':'';
+  return sign+'$'+Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:digits,maximumFractionDigits:digits});
+}
+// Compact number formatter — 7,000,000,000 renders as "7.00B" so huge
+// meme-coin quantities don't blow out the column width.
+function num(v){
+  if(v==null)return'—';
+  const n=parseFloat(v);
+  if(!isFinite(n))return'—';
+  const abs=Math.abs(n);
+  const sign=n<0?'-':'';
+  if(abs>=1e9)return sign+(abs/1e9).toFixed(2)+'B';
+  if(abs>=1e6)return sign+(abs/1e6).toFixed(2)+'M';
+  if(abs>=1e3)return sign+(abs/1e3).toFixed(2)+'K';
+  return n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:4});
+}
 const hhmm=ts=>new Date(ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
 
 function setAccount(a){
@@ -115,6 +142,7 @@ function setAccount(a){
 
 function setPositions(ps){
   const tb=$('pos-body');
+  $('pos-count').textContent='('+(ps?ps.length:0)+')';
   if(!ps||!ps.length){tb.innerHTML='<tr><td colspan="6" class="empty">No positions</td></tr>';return;}
   tb.innerHTML=ps.map(p=>{
     const pl=parseFloat(p.unrealized_pl),cls=pl>=0?'pos':'neg';

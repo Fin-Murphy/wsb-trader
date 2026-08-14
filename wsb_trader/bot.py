@@ -56,45 +56,6 @@ async def tick(io: TickIO) -> None:
             sources=[type(s).__name__ for s in io.scrapers],
         )
 
-    if not posts:
-        log.info("no_new_posts")
-        return
-
-    mentions = aggregate([extract(p.combined_text) for p in posts])
-    candidates = [m for m in mentions if m.count >= io.config.min_mentions]
-    log.info(
-        "tickers_extracted",
-        total=len(mentions),
-        above_threshold=len(candidates),
-        threshold=io.config.min_mentions,
-    )
-
-    if io.state is not None:
-        io.state.mentions = mentions
-        io.state.emit(
-            "mentions",
-            tickers=[
-                {"ticker": m.ticker, "count": m.count, "cashtag_count": m.cashtag_count}
-                for m in mentions[:50]
-            ],
-        )
-
-    if not candidates:
-        return
-
-    per_ticker_excerpts: dict[str, list[str]] = {m.ticker: [] for m in candidates}
-    for post in posts:
-        text = post.combined_text
-        tickers_in_post = {m.ticker for m in extract(text)}
-        for candidate in candidates:
-            if candidate.ticker in tickers_in_post:
-                per_ticker_excerpts[candidate.ticker].append(text)
-
-    analyses = await asyncio.gather(*(
-        _safe_analyze(io.ai, m.ticker, per_ticker_excerpts[m.ticker])
-        for m in candidates
-    ))
-
     try:
         current_positions = {p.symbol: p for p in await io.trader.list_positions()}
         account = await io.trader.get_account()
@@ -102,21 +63,59 @@ async def tick(io: TickIO) -> None:
         log.exception("list_positions_failed")
         return
 
+    # Always evaluate exits and refresh dashboard state, even when there are
+    # no new posts — otherwise position data goes stale between active ticks.
     await _check_position_exits(io, current_positions)
     await _fetch_and_emit_prices(io, current_positions)
 
-    for analysis in analyses:
-        if analysis is None:
-            continue
-        await _execute_signal(io, analysis, current_positions, account)
+    if posts:
+        mentions = aggregate([extract(p.combined_text) for p in posts])
+        candidates = [m for m in mentions if m.count >= io.config.min_mentions]
+        log.info(
+            "tickers_extracted",
+            total=len(mentions),
+            above_threshold=len(candidates),
+            threshold=io.config.min_mentions,
+        )
 
-    # Refresh account + positions after all trades and publish to dashboard.
+        if io.state is not None:
+            io.state.mentions = mentions
+            io.state.emit(
+                "mentions",
+                tickers=[
+                    {"ticker": m.ticker, "count": m.count, "cashtag_count": m.cashtag_count}
+                    for m in mentions[:50]
+                ],
+            )
+
+        if candidates:
+            per_ticker_excerpts: dict[str, list[str]] = {m.ticker: [] for m in candidates}
+            for post in posts:
+                text = post.combined_text
+                tickers_in_post = {m.ticker for m in extract(text)}
+                for candidate in candidates:
+                    if candidate.ticker in tickers_in_post:
+                        per_ticker_excerpts[candidate.ticker].append(text)
+
+            analyses = await asyncio.gather(*(
+                _safe_analyze(io.ai, m.ticker, per_ticker_excerpts[m.ticker])
+                for m in candidates
+            ))
+
+            for analysis in analyses:
+                if analysis is None:
+                    continue
+                await _execute_signal(io, analysis, current_positions, account)
+
+    # Always refresh account + positions and publish to dashboard so state
+    # stays fresh even on ticks that skip trading.
     if io.state is not None:
         try:
             refreshed = await io.trader.list_positions()
             acct = await io.trader.get_account()
             io.state.positions = refreshed
             io.state.account = acct
+            log.info("dashboard_refresh", n_positions=len(refreshed))
             io.state.emit(
                 "positions",
                 account={

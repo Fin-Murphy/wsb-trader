@@ -242,8 +242,12 @@ def _unwrap(resp: httpx.Response) -> dict | list:
 
 
 def _parse_position(d: dict) -> Position:
+    # Alpaca returns crypto positions with a slash ("BTC/USD") while orders
+    # are placed without one ("BTCUSD"). Normalize to the order form so
+    # position lookups by symbol match the ticker the bot trades on.
+    symbol = d["symbol"].replace("/", "")
     return Position(
-        symbol=d["symbol"],
+        symbol=symbol,
         qty=Decimal(d["qty"]),
         market_value=Decimal(d["market_value"]),
         unrealized_pl=Decimal(d["unrealized_pl"]),
