@@ -105,7 +105,7 @@ async def main() -> None:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         tick, "interval", seconds=cfg.poll_interval_seconds,
-        args=[io], next_run_time=None,
+        args=[io],
     )
     scheduler.start()
 

@@ -229,7 +229,7 @@ fetch('/api/snapshot').then(r=>r.json()).then(s=>{
   setPositions(s.positions);
   setMentions(s.mentions);
   if(s.last_tick_at)$('badge-txt').textContent='last tick '+hhmm(s.last_tick_at);
-  (s.recent_events||[]).slice().reverse().forEach(pushEvent);
+  (s.recent_events||[]).forEach(pushEvent);
 }).catch(()=>{});
 
 function connect(){
