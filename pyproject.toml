@@ -1,3 +1,18 @@
+[project]
+name = "wsb-trader"
+version = "0.1.0"
+description = "Paper-trading bot driven by multi-source social sentiment"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "apscheduler>=3.10",
+    "python-dotenv>=1.0",
+    "structlog>=24.1",
+]
+
+[project.scripts]
+wsb-trader = "wsb_trader.__main__:main"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
